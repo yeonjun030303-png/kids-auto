@@ -11,7 +11,11 @@ STYLE = "bright cheerful 2D kids cartoon, clean outlines, flat pastel colors, si
 OUT = pathlib.Path("out"); OUT.mkdir(exist_ok=True)
 
 def run(cmd):
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print("CMD FAILED:", " ".join(str(c) for c in cmd), flush=True)
+        print(r.stderr[-2000:], flush=True)
+        raise SystemExit(1)
 
 def gen_image(p, path):
     full = f"{CHAR}, {p}, {STYLE}"
@@ -20,9 +24,11 @@ def gen_image(p, path):
     for i in range(6):
         try:
             r = requests.get(url, timeout=180)
+            print("image try", i, r.status_code, r.headers.get("content-type"), flush=True)
             if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
                 path.write_bytes(r.content); return
-        except Exception:
+        except Exception as e:
+            print("image error", e, flush=True)
             pass
         time.sleep(10 * (i + 1))
     raise RuntimeError("image generation failed")
