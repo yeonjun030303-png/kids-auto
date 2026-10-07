@@ -1,17 +1,56 @@
-import os, json, datetime, requests
+import os, re, json, time, datetime, requests
 
 BIBLE = open("story_bible.txt", encoding="utf8").read()
 THEMES = ["나눔", "양치·손씻기", "정직하게 말하기", "기다림", "친구에게 사과하기", "정리정돈",
           "싫어하는 음식 도전", "무서움 이겨내기(안전한 수준)", "내 기분 말하기", "도움 요청하기",
           "안전(횡단보도·손잡기)", "계절과 자연", "색깔·숫자·모양 배우기", "가족 사랑", "친구 배려하기"]
-URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+BASE = "https://generativelanguage.googleapis.com/v1beta"
+HDR = {"x-goog-api-key": os.environ.get("GEMINI_API_KEY", "")}
+_model = None
+
+def pick_model():
+    global _model
+    if _model:
+        return _model
+    if os.environ.get("GEMINI_MODEL"):
+        _model = os.environ["GEMINI_MODEL"]
+        return _model
+    r = requests.get(BASE + "/models?pageSize=200", headers=HDR, timeout=60)
+    if r.status_code != 200:
+        print("ListModels failed:", r.status_code, r.text[:500], flush=True)
+        r.raise_for_status()
+    names = []
+    for m in r.json().get("models", []):
+        n = m["name"].split("/")[-1]
+        if ("generateContent" in m.get("supportedGenerationMethods", [])
+                and n.startswith("gemini") and "flash" in n
+                and not re.search(r"lite|image|tts|live|audio|robotics|computer|embedding|exp|thinking|customtools", n)):
+            names.append(n)
+    print("candidates:", names, flush=True)
+    if not names:
+        _model = "gemini-flash-latest"
+    else:
+        _model = max(names, key=lambda n: ("preview" not in n, [int(x) for x in re.findall(r"\d+", n)]))
+    print("using model:", _model, flush=True)
+    return _model
 
 def call(prompt):
-    r = requests.post(URL, headers={"x-goog-api-key": os.environ["GEMINI_API_KEY"]},
-                      json={"contents": [{"parts": [{"text": prompt}]}],
-                            "generationConfig": {"responseMimeType": "application/json"}}, timeout=120)
-    r.raise_for_status()
-    return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+    url = f"{BASE}/models/{pick_model()}:generateContent"
+    for i in range(4):
+        r = requests.post(url, headers=HDR, json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json"}}, timeout=180)
+        if r.status_code in (429, 500, 503):
+            print("retry", r.status_code, r.text[:200], flush=True)
+            time.sleep(20 * (i + 1))
+            continue
+        if r.status_code != 200:
+            print("GEMINI ERROR", r.status_code, r.text[:800], flush=True)
+        r.raise_for_status()
+        txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+        txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt.strip())
+        return json.loads(txt)
+    raise RuntimeError("gemini retries exhausted")
 
 def gen_story(n, char):
     hist = json.load(open("history.json", encoding="utf8")) if os.path.exists("history.json") else []
