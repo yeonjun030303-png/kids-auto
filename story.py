@@ -6,51 +6,69 @@ THEMES = ["나눔", "양치·손씻기", "정직하게 말하기", "기다림", 
           "안전(횡단보도·손잡기)", "계절과 자연", "색깔·숫자·모양 배우기", "가족 사랑", "친구 배려하기"]
 BASE = "https://generativelanguage.googleapis.com/v1beta"
 HDR = {"x-goog-api-key": os.environ.get("GEMINI_API_KEY", "")}
-_model = None
+_models = None
 
-def pick_model():
-    global _model
-    if _model:
-        return _model
+def models():
+    global _models
+    if _models:
+        return _models
     if os.environ.get("GEMINI_MODEL"):
-        _model = os.environ["GEMINI_MODEL"]
-        return _model
-    r = requests.get(BASE + "/models?pageSize=200", headers=HDR, timeout=60)
-    if r.status_code != 200:
-        print("ListModels failed:", r.status_code, r.text[:500], flush=True)
-        r.raise_for_status()
+        _models = [os.environ["GEMINI_MODEL"]]
+        return _models
     names = []
-    for m in r.json().get("models", []):
-        n = m["name"].split("/")[-1]
-        if ("generateContent" in m.get("supportedGenerationMethods", [])
-                and n.startswith("gemini") and "flash" in n
-                and not re.search(r"lite|image|tts|live|audio|robotics|computer|embedding|exp|thinking|customtools", n)):
-            names.append(n)
-    print("candidates:", names, flush=True)
-    if not names:
-        _model = "gemini-flash-latest"
-    else:
-        _model = max(names, key=lambda n: ("preview" not in n, [int(x) for x in re.findall(r"\d+", n)]))
-    print("using model:", _model, flush=True)
-    return _model
+    try:
+        r = requests.get(BASE + "/models?pageSize=200", headers=HDR, timeout=60)
+        if r.status_code != 200:
+            print("ListModels failed:", r.status_code, r.text[:300], flush=True)
+        for m in r.json().get("models", []):
+            n = m["name"].split("/")[-1]
+            if ("generateContent" in m.get("supportedGenerationMethods", [])
+                    and n.startswith("gemini") and "flash" in n
+                    and not re.search(r"lite|image|tts|live|audio|robotics|computer|embedding|exp|thinking|customtools|omni", n)):
+                names.append(n)
+    except Exception as e:
+        print("ListModels error:", e, flush=True)
+    pref = [m for m in ("gemini-2.5-flash", "gemini-flash-latest") if m in names]
+    rest = sorted([n for n in names if n not in pref],
+                  key=lambda n: ("preview" in n, [-int(x) for x in re.findall(r"\d+", n)]))
+    _models = pref + rest
+    if not _models:
+        _models = ["gemini-2.5-flash", "gemini-flash-latest"]
+    print("model order:", _models, flush=True)
+    return _models
 
 def call(prompt):
-    url = f"{BASE}/models/{pick_model()}:generateContent"
-    for i in range(4):
-        r = requests.post(url, headers=HDR, json={
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json"}}, timeout=180)
-        if r.status_code in (429, 500, 503):
-            print("retry", r.status_code, r.text[:200], flush=True)
-            time.sleep(20 * (i + 1))
-            continue
-        if r.status_code != 200:
-            print("GEMINI ERROR", r.status_code, r.text[:800], flush=True)
-        r.raise_for_status()
-        txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt.strip())
-        return json.loads(txt)
-    raise RuntimeError("gemini retries exhausted")
+    body = {"contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json"}}
+    for m in list(models()):
+        url = f"{BASE}/models/{m}:generateContent"
+        for i in range(2):
+            try:
+                r = requests.post(url, headers=HDR, json=body, timeout=180)
+            except Exception as e:
+                print("request error", m, e, flush=True)
+                time.sleep(5)
+                continue
+            if r.status_code == 200:
+                try:
+                    parts = r.json()["candidates"][0]["content"]["parts"]
+                    txt = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+                    txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt.strip())
+                    data = json.loads(txt)
+                    if m in _models:
+                        _models.remove(m)
+                        _models.insert(0, m)
+                    print("ok:", m, flush=True)
+                    return data
+                except Exception as e:
+                    print("parse error", m, e, flush=True)
+                    break
+            print("gemini", m, r.status_code, r.text[:200].replace("\n", " "), flush=True)
+            if r.status_code in (500, 503):
+                time.sleep(8)
+                continue
+            break
+    raise RuntimeError("all gemini models failed")
 
 def gen_story(n, char):
     hist = json.load(open("history.json", encoding="utf8")) if os.path.exists("history.json") else []
